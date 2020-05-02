@@ -297,7 +297,11 @@ impl LanguageServerClient {
             "window/progress" => {
                 match params {
                     Params::Map(m) => {
-                        let done = m.get("done").unwrap_or(&Value::Bool(false));
+                        let done_default = &Value::Bool(false);
+                        let mut done = m.get("done").unwrap_or(done_default);
+                        if done.is_null() {
+                            done = done_default;
+                        }
                         if let Value::Bool(done) = done {
                             let id: String =
                                 serde_json::from_value(m.get("id").unwrap().clone()).unwrap();
