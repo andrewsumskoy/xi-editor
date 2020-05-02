@@ -19,12 +19,16 @@ pub mod manifest;
 pub mod rpc;
 
 use std::fmt;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Child, Command as ProcCommand, Stdio};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 
+use log::{log, Level};
+use regex::Regex;
 use serde_json::Value;
 
 use xi_rpc::{self, RpcLoop, RpcPeer};
@@ -173,12 +177,14 @@ pub(crate) fn start_plugin_process(
             let child = ProcCommand::new(&plugin_desc.exec_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn();
 
             match child {
                 Ok(mut child) => {
                     let child_stdin = child.stdin.take().unwrap();
                     let child_stdout = child.stdout.take().unwrap();
+                    let child_stderr = child.stderr.take().unwrap();
                     let mut looper = RpcLoop::new(child_stdin);
                     let peer: RpcPeer = Box::new(looper.get_raw_peer());
                     let name = plugin_desc.name.clone();
@@ -188,6 +194,35 @@ pub(crate) fn start_plugin_process(
                     // set tracing immediately
                     if xi_trace::is_enabled() {
                         plugin.toggle_tracing(true);
+                    }
+
+                    let pipe_spawn_result = thread::Builder::new()
+                        .name(format!("<{}> stderr redirect thread", &plugin_desc.name))
+                        .spawn(move || {
+                            let re: Regex = Regex::new(
+                                r"\[([^\]]*)\]\[([^\]]*)\]\[([^\]]*)\]\[([^\]]*)\]\s(.*)",
+                            )
+                            .unwrap();
+                            let mut log_level = Level::Debug;
+                            let mut target = plugin_desc.name.clone();
+
+                            BufReader::new(child_stderr).lines().for_each(|line| {
+                                let l = line.unwrap();
+                                let mut has_found_any = false;
+                                for cap in re.captures_iter(l.as_str()) {
+                                    log_level = Level::from_str(&cap[4]).unwrap();
+                                    target = cap[3].to_string();
+                                    let message = &cap[5];
+                                    log!(target: target.as_str(), log_level, "{}", message);
+                                    has_found_any = true;
+                                }
+                                if !has_found_any {
+                                    log!(target: target.as_str(), log_level, "{}", l);
+                                }
+                            });
+                        });
+                    if let Err(err) = pipe_spawn_result {
+                        error!("thread stderr redirect spawn failed for {}, {:?}", id, err);
                     }
 
                     core.plugin_connect(Ok(plugin));
